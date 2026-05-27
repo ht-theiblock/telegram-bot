@@ -1,4 +1,5 @@
-python-telegram-bot
-flask
-openai           # Thay vì groq
-ddgs
+# ĐÚNG - chỉ có tên thư viện
+python-telegram-bot==20.7
+flask==3.0.0
+openai==1.54.0
+ddgs==9.7.0
