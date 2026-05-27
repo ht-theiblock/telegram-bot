@@ -1,40 +1,64 @@
 import os
-import json
 import asyncio
 import threading
+import requests
 from flask import Flask
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters
-from openai import OpenAI  # OpenRouter dùng OpenAI-compatible API
+from openai import OpenAI
 from ddgs import DDGS
 
-# Health check server để Render không tắt bot
+# ==================== HEALTH CHECK SERVER CHO RENDER ====================
 health_app = Flask(__name__)
 
 @health_app.route("/")
 def health():
-    return "Bot đang chạy! 🐔", 200
+    return "Bot is running! 🚀", 200
+
+@health_app.route("/health")
+def health_check():
+    return "OK", 200
 
 def run_health_server():
     port = int(os.environ.get("PORT", 8080))
     health_app.run(host="0.0.0.0", port=port)
 
+# ==================== CẤU HÌNH BOT ====================
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
-OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")  # Đổi tên biến
+OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
 
 if not BOT_TOKEN:
     raise ValueError("❌ Chưa tìm thấy BOT_TOKEN!")
 if not OPENROUTER_API_KEY:
     raise ValueError("❌ Chưa tìm thấy OPENROUTER_API_KEY!")
 
-# Khởi tạo client cho OpenRouter (tương thích OpenAI)
+# Xóa webhook cũ để tránh conflict
+try:
+    delete_url = f"https://api.telegram.org/bot{BOT_TOKEN}/deleteWebhook"
+    response = requests.get(delete_url)
+    print("✅ Đã xóa webhook cũ:", response.json())
+except Exception as e:
+    print(f"⚠️ Không thể xóa webhook: {e}")
+
+# Khởi tạo client cho OpenRouter
 client = OpenAI(
     base_url="https://openrouter.ai/api/v1",
     api_key=OPENROUTER_API_KEY,
+    default_headers={
+        "HTTP-Referer": "https://your-bot.onrender.com",  # Thay bằng URL Render của bạn
+        "X-Title": "Telegram Bot",
+    }
 )
 
-# Model FREE trên OpenRouter (có thể đổi model khác)
-MODEL = "deepseek/deepseek-r1:free"  # Hoặc "mistralai/mistral-7b-instruct:free"
+# ==================== CẤU HÌNH MODEL ====================
+# Các model free đang hoạt động tốt (thử từng cái nếu cái đầu không được)
+MODEL = "google/gemini-2.0-flash-exp:free"  # Khuyến nghị - ổn định nhất
+# MODEL = "meta-llama/llama-3.2-3b-instruct:free"
+# MODEL = "microsoft/phi-3.5-mini-128k-instruct:free"
+# MODEL = "mistralai/mistral-7b-instruct:free"
+# MODEL = "deepseek/deepseek-r1:free"
+
+print(f"🧠 Đang sử dụng model: {MODEL}")
 
 SYSTEM_PROMPT = (
     "Bạn là một người bạn đồng hành AI thông minh, thân thiện và hài hước. "
@@ -49,11 +73,13 @@ SYSTEM_PROMPT = (
 MAX_HISTORY = 20
 chat_histories: dict[int, list[dict]] = {}
 
+# ==================== CÁC HÀM XỬ LÝ ====================
 
 def ai_needs_search(query: str) -> bool:
+    """Kiểm tra câu hỏi có cần tìm kiếm web không"""
     try:
         response = client.chat.completions.create(
-            model="google/gemma-7b-it:free",  # Model free cho phân loại
+            model="google/gemini-2.0-flash-exp:free",
             messages=[
                 {
                     "role": "system",
@@ -72,11 +98,11 @@ def ai_needs_search(query: str) -> bool:
         answer = response.choices[0].message.content.strip().upper()
         return "YES" in answer
     except Exception as e:
-        print(f"⚠️ Lỗi phân loại: {e}")
+        print(f"⚠️ Lỗi phân loại tìm kiếm: {e}")
         return False
 
-
 def web_search(query: str, max_results: int = 5) -> str:
+    """Tìm kiếm web bằng DuckDuckGo"""
     try:
         with DDGS() as ddgs:
             results = list(ddgs.text(query, max_results=max_results))
@@ -92,12 +118,10 @@ def web_search(query: str, max_results: int = 5) -> str:
     except Exception as e:
         return f"Lỗi tìm kiếm: {e}"
 
-
 def get_history(user_id: int) -> list[dict]:
     if user_id not in chat_histories:
         chat_histories[user_id] = []
     return chat_histories[user_id]
-
 
 def add_to_history(user_id: int, role: str, content: str):
     history = get_history(user_id)
@@ -105,8 +129,8 @@ def add_to_history(user_id: int, role: str, content: str):
     if len(history) > MAX_HISTORY * 2:
         chat_histories[user_id] = history[-(MAX_HISTORY * 2):]
 
-
 def call_openrouter(user_id: int, user_message: str) -> tuple[str, bool]:
+    """Gọi OpenRouter API để lấy phản hồi"""
     history = get_history(user_id)
     searched = False
     system_content = SYSTEM_PROMPT
@@ -115,29 +139,30 @@ def call_openrouter(user_id: int, user_message: str) -> tuple[str, bool]:
         print(f"🔍 Tìm kiếm web: {user_message}")
         search_results = web_search(user_message)
         searched = True
-        system_content = (
-            SYSTEM_PROMPT + "\n\n"
-            "Dưới đây là kết quả tìm kiếm web mới nhất liên quan đến câu hỏi của người dùng. "
-            "Hãy dùng thông tin này để trả lời chính xác:\n\n"
-            f"{search_results}"
-        )
+        system_content = SYSTEM_PROMPT + f"\n\nDưới đây là kết quả tìm kiếm web mới nhất:\n\n{search_results}"
 
     messages = [{"role": "system", "content": system_content}] + history + [
         {"role": "user", "content": user_message}
     ]
 
-    response = client.chat.completions.create(
-        model=MODEL,
-        messages=messages,
-        temperature=0.7,
-        max_tokens=1024,
-        extra_headers={
-            "HTTP-Referer": "https://your-bot-url.onrender.com",  # Thay bằng URL Render của bạn
-            "X-Title": "Ga Telegram Bot",
-        }
-    )
-    return response.choices[0].message.content, searched
+    try:
+        print(f"📤 Gửi request đến OpenRouter với model: {MODEL}")
+        response = client.chat.completions.create(
+            model=MODEL,
+            messages=messages,
+            temperature=0.7,
+            max_tokens=1024,
+        )
+        reply = response.choices[0].message.content
+        print(f"📥 Nhận phản hồi thành công, độ dài: {len(reply)} ký tự")
+        return reply, searched
+    except Exception as e:
+        print(f"❌ LỖI CHI TIẾT TỪ OPENROUTER: {type(e).__name__} - {e}")
+        if hasattr(e, 'response') and e.response:
+            print(f"📄 Response nội dung: {e.response.text}")
+        return f"Xin lỗi, tôi đang gặp lỗi kỹ thuật. Vui lòng thử lại sau!", False
 
+# ==================== CÁC HÀNH ĐỘNG TELEGRAM ====================
 
 async def start(update: Update, context):
     user_id = update.effective_user.id
@@ -147,30 +172,24 @@ async def start(update: Update, context):
         "✨ Mình có thể:\n"
         "• Trả lời mọi câu hỏi\n"
         "• Tìm kiếm thông tin thời gian thực 🌐\n"
-        "• Nhớ ngữ cảnh cuộc trò chuyện 🧠\n"
-        "• Hỗ trợ học tập, công việc\n\n"
-        "Cứ nhắn gì cũng được! 😊\n"
-        "Dùng /clear để xóa lịch sử hội thoại."
+        "• Nhớ ngữ cảnh cuộc trò chuyện 🧠\n\n"
+        "📝 Dùng /clear để xóa lịch sử hội thoại.\n"
+        "🆘 Dùng /help để xem hướng dẫn."
     )
-
 
 async def help_command(update: Update, context):
     await update.message.reply_text(
         "📖 Hướng dẫn sử dụng:\n\n"
-        "• Nhắn tin bình thường → bot trả lời\n"
-        "• Hỏi tin tức, thời tiết, giá cả → bot tự tìm kiếm web 🌐\n"
-        "• Bot nhớ ngữ cảnh hội thoại 🧠\n"
-        "• /clear — xóa lịch sử hội thoại\n"
-        "• /start — bắt đầu lại từ đầu\n"
-        "• /help — xem hướng dẫn này"
+        "• /start - Bắt đầu hội thoại mới\n"
+        "• /clear - Xóa lịch sử hội thoại\n"
+        "• /help - Xem hướng dẫn này\n\n"
+        "💡 Bạn có thể hỏi tôi bất cứ điều gì!"
     )
-
 
 async def clear_command(update: Update, context):
     user_id = update.effective_user.id
     chat_histories.pop(user_id, None)
     await update.message.reply_text("🗑️ Đã xóa lịch sử! Bắt đầu lại nhé 😊")
-
 
 async def handle_message(update: Update, context):
     user_message = update.message.text
@@ -178,15 +197,10 @@ async def handle_message(update: Update, context):
     user_id = update.effective_user.id
     chat_type = update.message.chat.type
 
+    # Xử lý trong group: chỉ phản hồi khi tag bot
     if chat_type in ("group", "supergroup"):
         bot_username = context.bot.username
-        is_tagged = f"@{bot_username}" in user_message
-        is_reply_to_bot = (
-            update.message.reply_to_message is not None
-            and update.message.reply_to_message.from_user is not None
-            and update.message.reply_to_message.from_user.username == bot_username
-        )
-        if not is_tagged and not is_reply_to_bot:
+        if f"@{bot_username}" not in user_message:
             return
         user_message = user_message.replace(f"@{bot_username}", "").strip()
         if not user_message:
@@ -196,46 +210,46 @@ async def handle_message(update: Update, context):
 
     try:
         reply, searched = await asyncio.to_thread(call_openrouter, user_id, user_message)
-        if not reply:
-            reply = "😅 Mình chưa hiểu lắm, bạn có thể hỏi lại không?"
-
-        # Thêm icon nếu có tìm kiếm web
-        if searched:
-            reply = "🌐 " + reply
-
-        add_to_history(user_id, "user", user_message)
-        add_to_history(user_id, "assistant", reply)
-        await update.message.reply_text(reply)
+        
+        if not reply or "lỗi" in reply.lower() and "xin lỗi" in reply.lower():
+            await update.message.reply_text(reply)
+        else:
+            if searched:
+                reply = "🌐 " + reply
+            add_to_history(user_id, "user", user_message)
+            add_to_history(user_id, "assistant", reply)
+            await update.message.reply_text(reply)
 
     except Exception as e:
-        print(f"❌ Lỗi: {e}")
+        print(f"❌ Lỗi trong handle_message: {e}")
         await update.message.reply_text("⚠️ Có lỗi xảy ra, vui lòng thử lại sau giây lát!")
 
+# ==================== MAIN ====================
 
 def main():
-    print("🤖 Đang khởi động bot...")
-    print("📌 Bot token: ✅")
-    print("🔑 OpenRouter API key: ✅")
-    print("🌐 Tìm kiếm web: ✅ DuckDuckGo")
+    print("=" * 50)
+    print("🤖 Đang khởi động bot Telegram...")
+    print(f"📌 Bot Token: {'✅' if BOT_TOKEN else '❌'}")
+    print(f"🔑 OpenRouter API Key: {'✅' if OPENROUTER_API_KEY else '❌'}")
+    print(f"🧠 Model: {MODEL}")
+    print("=" * 50)
 
     # Chạy health check server trên thread riêng
     t = threading.Thread(target=run_health_server, daemon=True)
     t.start()
-    print("💓 Health check server: ✅")
+    print("💓 Health check server đang chạy")
 
-    # Tạo event loop mới — cần thiết cho Python 3.10+
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-
+    # Tạo và chạy bot
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("clear", clear_command))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-
-    print("🚀 Bot đang chạy...")
-    app.run_polling()
-
+    
+    print("🚀 Bot đang chạy polling...")
+    print("=" * 50)
+    # Chạy polling (blocking)
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
     main()
