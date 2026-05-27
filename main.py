@@ -5,6 +5,7 @@ from flask import Flask
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters
 from openai import OpenAI
+from ddgs import DDGS
 
 health_app = Flask(__name__)
 
@@ -29,7 +30,7 @@ client = OpenAI(
     base_url="https://openrouter.ai/api/v1",
 )
 
-MODEL = "deepseek/deepseek-chat:online"
+MODEL = "deepseek/deepseek-chat"
 
 SYSTEM_PROMPT = (
     "Bạn là một người bạn đồng hành AI thông minh, thân thiện và hài hước. "
@@ -38,11 +39,54 @@ SYSTEM_PROMPT = (
     "đôi khi có thể dùng một chút biểu tượng cảm xúc (emoji) để cuộc trò chuyện thêm sinh động. "
     "Mục tiêu của bạn là giúp đỡ và mang lại niềm vui cho người dùng. "
     "Nhớ ngữ cảnh của cuộc trò chuyện để trả lời mạch lạc. "
-    "QUAN TRỌNG: Luôn trả lời CỰC NGẮN GỌN, súc tích, đi thẳng vào vấn đề. Không dài dòng, không giải thích thừa."
+    "QUAN TRỌNG: Luôn trả lời CỰC NGẮN GỌN, súc tích, đi thẳng vào vấn đề. Không dài dòng, không giải thích thừa. "
+    "TUYỆT ĐỐI không dùng ký hiệu markdown như **, __, ##, ``` trong câu trả lời. Chỉ dùng văn bản thuần túy."
 )
 
 MAX_HISTORY = 20
 chat_histories: dict[int, list[dict]] = {}
+
+
+def ai_needs_search(query: str) -> bool:
+    try:
+        response = client.chat.completions.create(
+            model=MODEL,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "Bạn là bộ phân loại câu hỏi. "
+                        "Nhiệm vụ: xác định câu hỏi có cần thông tin thời gian thực không "
+                        "(tin tức, thời tiết, giá cả, sự kiện hiện tại, kết quả mới nhất...). "
+                        "Chỉ trả lời đúng 1 từ: YES hoặc NO."
+                    )
+                },
+                {"role": "user", "content": query}
+            ],
+            temperature=0,
+            max_tokens=5,
+        )
+        answer = response.choices[0].message.content.strip().upper()
+        return "YES" in answer
+    except Exception:
+        return False
+
+
+def web_search(query: str, max_results: int = 5) -> str:
+    try:
+        with DDGS() as ddgs:
+            results = list(ddgs.text(query, max_results=max_results))
+        if not results:
+            return "Không tìm thấy kết quả nào."
+        output = []
+        for i, r in enumerate(results, 1):
+            title = r.get("title", "")
+            body = r.get("body", "")
+            href = r.get("href", "")
+            output.append(f"{i}. {title}\n{body}\nNguồn: {href}")
+        return "\n\n".join(output)
+    except Exception as e:
+        return f"Lỗi tìm kiếm: {e}"
 
 
 def get_history(user_id: int) -> list[dict]:
@@ -58,9 +102,23 @@ def add_to_history(user_id: int, role: str, content: str):
         chat_histories[user_id] = history[-(MAX_HISTORY * 2):]
 
 
-def call_ai(user_id: int, user_message: str) -> str:
+def call_ai(user_id: int, user_message: str) -> tuple[str, bool]:
     history = get_history(user_id)
-    messages = [{"role": "system", "content": SYSTEM_PROMPT}] + history + [
+    searched = False
+    system_content = SYSTEM_PROMPT
+
+    if ai_needs_search(user_message):
+        print(f"🔍 Tìm kiếm web: {user_message}")
+        search_results = web_search(user_message)
+        searched = True
+        system_content = (
+            SYSTEM_PROMPT + "\n\n"
+            "Dưới đây là kết quả tìm kiếm web mới nhất liên quan đến câu hỏi của người dùng. "
+            "Hãy dùng thông tin này để trả lời chính xác:\n\n"
+            f"{search_results}"
+        )
+
+    messages = [{"role": "system", "content": system_content}] + history + [
         {"role": "user", "content": user_message}
     ]
 
@@ -70,7 +128,7 @@ def call_ai(user_id: int, user_message: str) -> str:
         temperature=0.7,
         max_tokens=1024,
     )
-    return response.choices[0].message.content
+    return response.choices[0].message.content, searched
 
 
 async def start(update: Update, context):
@@ -129,9 +187,14 @@ async def handle_message(update: Update, context):
     await context.bot.send_chat_action(chat_id=chat_id, action="typing")
 
     try:
-        reply = await asyncio.to_thread(call_ai, user_id, user_message)
+        reply, searched = await asyncio.to_thread(call_ai, user_id, user_message)
         if not reply:
             reply = "😅 Mình chưa hiểu lắm, bạn có thể hỏi lại không?"
+
+        reply = reply.replace("**", "").replace("__", "").replace("```", "").replace("##", "").replace("# ", "")
+
+        if searched:
+            reply = "🌐 " + reply
 
         add_to_history(user_id, "user", user_message)
         add_to_history(user_id, "assistant", reply)
@@ -147,6 +210,7 @@ def main():
     print("📌 Bot token: ✅")
     print("🔑 OpenRouter API key: ✅")
     print(f"🧠 Model: {MODEL}")
+    print("🌐 Tìm kiếm web: ✅ DuckDuckGo")
 
     t = threading.Thread(target=run_health_server, daemon=True)
     t.start()
