@@ -203,6 +203,10 @@ def main():
     t.start()
     print("💓 Health check server: ✅")
 
+    # Tạo event loop mới — cần thiết cho Python 3.10+
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+
     app = Application.builder().token(BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
