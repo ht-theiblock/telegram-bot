@@ -40,24 +40,33 @@ SYSTEM_PROMPT = (
     "QUAN TRỌNG: Luôn trả lời CỰC NGẮN GỌN, súc tích, đi thẳng vào vấn đề. Không dài dòng, không giải thích thừa."
 )
 
-# Từ khóa gợi ý cần tìm kiếm web
-SEARCH_KEYWORDS = [
-    "hôm nay", "bây giờ", "hiện tại", "mới nhất", "gần đây", "vừa",
-    "tin tức", "thời sự", "sự kiện", "thông báo",
-    "thời tiết", "nhiệt độ", "mưa", "nắng",
-    "giá", "tỷ giá", "bitcoin", "chứng khoán", "vàng", "đô", "usd",
-    "kết quả", "lịch thi đấu", "bóng đá", "điểm số",
-    "năm nay", "tháng này", "tuần này",
-    "who won", "latest", "current", "today", "now", "news", "price",
-]
-
 MAX_HISTORY = 20
 chat_histories: dict[int, list[dict]] = {}
 
 
-def needs_search(query: str) -> bool:
-    query_lower = query.lower()
-    return any(kw in query_lower for kw in SEARCH_KEYWORDS)
+def ai_needs_search(query: str) -> bool:
+    try:
+        response = client.chat.completions.create(
+            model="llama-3.1-8b-instant",
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "Bạn là bộ phân loại câu hỏi. "
+                        "Nhiệm vụ: xác định câu hỏi có cần thông tin thời gian thực không "
+                        "(tin tức, thời tiết, giá cả, sự kiện hiện tại, vị trí hiện tại, kết quả mới nhất...). "
+                        "Chỉ trả lời đúng 1 từ: YES hoặc NO."
+                    )
+                },
+                {"role": "user", "content": query}
+            ],
+            temperature=0,
+            max_tokens=5,
+        )
+        answer = response.choices[0].message.content.strip().upper()
+        return "YES" in answer
+    except Exception:
+        return False
 
 
 def web_search(query: str, max_results: int = 5) -> str:
@@ -95,7 +104,7 @@ def call_groq(user_id: int, user_message: str) -> tuple[str, bool]:
     searched = False
     system_content = SYSTEM_PROMPT
 
-    if needs_search(user_message):
+    if ai_needs_search(user_message):
         print(f"🔍 Tìm kiếm web: {user_message}")
         search_results = web_search(user_message)
         searched = True
