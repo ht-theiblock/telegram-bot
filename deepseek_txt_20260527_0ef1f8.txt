@@ -1,4 +1,0 @@
-python-telegram-bot
-flask
-openai           # Thay vì groq
-ddgs
