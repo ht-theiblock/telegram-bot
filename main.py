@@ -21,6 +21,7 @@ def run_health_server():
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
 CMC_API_KEY = os.environ.get("CMC_API_KEY")
+RAPIDAPI_KEY = os.environ.get("RAPIDAPI_KEY")
 
 if not BOT_TOKEN:
     raise ValueError("❌ Chưa tìm thấy BOT_TOKEN!")
@@ -28,6 +29,8 @@ if not OPENROUTER_API_KEY:
     raise ValueError("❌ Chưa tìm thấy OPENROUTER_API_KEY!")
 if not CMC_API_KEY:
     raise ValueError("❌ Chưa tìm thấy CMC_API_KEY!")
+if not RAPIDAPI_KEY:
+    raise ValueError("❌ Chưa tìm thấy RAPIDAPI_KEY!")
 
 client = OpenAI(
     api_key=OPENROUTER_API_KEY,
@@ -50,6 +53,12 @@ SYSTEM_PROMPT = (
 MAX_HISTORY = 20
 chat_histories: dict[int, list[dict]] = {}
 
+GOLD_KEYWORDS = [
+    "giá vàng", "vàng sjc", "vàng pnj", "vàng doji", "vàng 9999", "vàng 24k",
+    "vàng 18k", "giá vàng hôm nay", "vàng miếng", "vàng nhẫn", "gold price",
+    "gia vang", "vang sjc", "vang pnj", "vàng thế giới", "vàng trong nước"
+]
+
 CRYPTO_KEYWORDS = [
     "giá", "price", "crypto", "coin", "token", "bitcoin", "ethereum", "bnb",
     "btc", "eth", "sol", "xrp", "ada", "doge", "usdt", "usdc", "matic",
@@ -57,6 +66,51 @@ CRYPTO_KEYWORDS = [
     "pump", "dump", "chart", "thị trường", "market", "altcoin", "defi",
     "mcap", "vốn hóa", "volume", "khối lượng", "24h", "tuần", "tháng"
 ]
+
+
+def is_gold_query(query: str) -> bool:
+    query_lower = query.lower()
+    return any(kw in query_lower for kw in GOLD_KEYWORDS)
+
+
+def get_gold_price() -> str:
+    # Dùng SJC API trực tiếp (miễn phí, ổn định)
+    try:
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Accept": "application/json",
+        }
+        r = requests.get(
+            "https://sjc.com.vn/GoldPrice/Services/PriceService.ashx",
+            headers=headers,
+            timeout=8
+        )
+        if r.status_code == 200:
+            data = r.json()
+            updated = data.get("latestDate", "")
+            items = data.get("data", [])
+            lines = [f"Giá vàng SJC (cập nhật: {updated}):"]
+            seen = set()
+            for item in items:
+                name = item.get("TypeName", "")
+                branch = item.get("BranchName", "")
+                buy = item.get("Buy", "N/A")
+                sell = item.get("Sell", "N/A")
+                key = f"{name}-{branch}"
+                if key not in seen and buy != "N/A":
+                    seen.add(key)
+                    lines.append(f"  {name} ({branch}): Mua {buy} | Bán {sell} (nghìn VNĐ/lượng)")
+            if len(lines) > 1:
+                print("🥇 Giá vàng từ SJC API")
+                return "\n".join(lines)
+    except Exception as e:
+        print(f"⚠️ SJC API lỗi: {e}")
+
+    # Fallback: DuckDuckGo
+    from datetime import datetime
+    today = datetime.now().strftime("%Y-%m-%d")
+    print("🔍 Fallback tìm giá vàng qua DuckDuckGo")
+    return web_search(f"giá vàng SJC PNJ hôm nay {today}", max_results=4)
 
 
 def is_crypto_query(query: str) -> bool:
@@ -203,19 +257,32 @@ def add_to_history(user_id: int, role: str, content: str):
         chat_histories[user_id] = history[-(MAX_HISTORY * 2):]
 
 
-def call_ai(user_id: int, user_message: str) -> tuple[str, bool, bool]:
+def call_ai(user_id: int, user_message: str) -> tuple[str, str]:
     history = get_history(user_id)
-    searched = False
-    crypto_used = False
+    source = ""
     system_content = SYSTEM_PROMPT
 
-    if is_crypto_query(user_message):
+    # Ưu tiên 1: Giá vàng
+    if is_gold_query(user_message):
+        print(f"🥇 Tra giá vàng: {user_message}")
+        gold_data = get_gold_price()
+        if gold_data:
+            source = "gold"
+            system_content = (
+                SYSTEM_PROMPT + "\n\n"
+                "Dưới đây là dữ liệu giá vàng thời gian thực. "
+                "Hãy dùng thông tin này để trả lời chính xác:\n\n"
+                f"{gold_data}"
+            )
+
+    # Ưu tiên 2: Giá crypto
+    elif is_crypto_query(user_message):
         symbols = extract_crypto_symbols(user_message)
         if symbols:
             print(f"📈 Lấy giá crypto: {symbols}")
             price_data = get_crypto_prices(symbols)
             if price_data:
-                crypto_used = True
+                source = "crypto"
                 system_content = (
                     SYSTEM_PROMPT + "\n\n"
                     "Dưới đây là dữ liệu giá crypto thời gian thực từ CoinMarketCap. "
@@ -223,10 +290,11 @@ def call_ai(user_id: int, user_message: str) -> tuple[str, bool, bool]:
                     f"{price_data}"
                 )
 
-    if not crypto_used and ai_needs_search(user_message):
+    # Ưu tiên 3: Tìm kiếm web
+    if not source and ai_needs_search(user_message):
         print(f"🔍 Tìm kiếm web: {user_message}")
         search_results = web_search(user_message)
-        searched = True
+        source = "web"
         system_content = (
             SYSTEM_PROMPT + "\n\n"
             "Dưới đây là kết quả tìm kiếm web mới nhất liên quan đến câu hỏi của người dùng. "
@@ -244,7 +312,7 @@ def call_ai(user_id: int, user_message: str) -> tuple[str, bool, bool]:
         temperature=0.7,
         max_tokens=1024,
     )
-    return response.choices[0].message.content, searched, crypto_used
+    return response.choices[0].message.content, source
 
 
 async def start(update: Update, context):
@@ -256,6 +324,7 @@ async def start(update: Update, context):
         "• Trả lời mọi câu hỏi\n"
         "• Tìm kiếm thông tin thời gian thực 🌐\n"
         "• Tra giá coin/crypto realtime 📈\n"
+        "• Tra giá vàng SJC realtime 🥇\n"
         "• Nhớ ngữ cảnh cuộc trò chuyện 🧠\n"
         "• Hỗ trợ học tập, công việc\n\n"
         "Cứ nhắn gì cũng được! 😊\n"
@@ -268,7 +337,9 @@ async def help_command(update: Update, context):
         "📖 Hướng dẫn sử dụng:\n\n"
         "• Nhắn tin bình thường → bot trả lời\n"
         "• Hỏi tin tức, thời tiết → bot tự tìm kiếm web 🌐\n"
-        "• Hỏi giá coin/crypto → bot lấy giá thật từ CoinMarketCap 📈\n"
+        "• Hỏi giá coin/crypto → lấy giá thật từ CoinMarketCap 📈\n"
+        "• Hỏi giá vàng → lấy giá thật từ SJC realtime 🥇\n"
+        "  Ví dụ: 'giá vàng hôm nay', 'vàng SJC bao nhiêu?'\n"
         "• Bot nhớ ngữ cảnh hội thoại 🧠\n"
         "• /clear — xóa lịch sử hội thoại\n"
         "• /start — bắt đầu lại từ đầu\n"
@@ -318,15 +389,17 @@ async def handle_message(update: Update, context):
     await context.bot.send_chat_action(chat_id=chat_id, action="typing")
 
     try:
-        reply, searched, crypto_used = await asyncio.to_thread(call_ai, user_id, user_message)
+        reply, source = await asyncio.to_thread(call_ai, user_id, user_message)
         if not reply:
             reply = "😅 Mình chưa hiểu lắm, bạn có thể hỏi lại không?"
 
         reply = reply.replace("**", "").replace("__", "").replace("```", "").replace("##", "").replace("# ", "")
 
-        if crypto_used:
+        if source == "gold":
+            reply = "🥇 " + reply
+        elif source == "crypto":
             reply = "📈 " + reply
-        elif searched:
+        elif source == "web":
             reply = "🌐 " + reply
 
         add_to_history(user_id, "user", user_message)
@@ -345,6 +418,7 @@ def main():
     print(f"🧠 Model: {MODEL}")
     print("🌐 Tìm kiếm web: ✅ DuckDuckGo")
     print("📈 Giá crypto: ✅ CoinMarketCap")
+    print("🥇 Giá vàng: ✅ SJC API")
 
     t = threading.Thread(target=run_health_server, daemon=True)
     t.start()
