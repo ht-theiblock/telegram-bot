@@ -199,6 +199,170 @@ def get_crypto_prices(symbols: list[str]) -> str:
         return ""
 
 
+def get_usd_to_vnd() -> float:
+    try:
+        r = requests.get(
+            "https://www.vietcombank.com.vn/api/exchangerates?date=&currencyCode=USD",
+            timeout=6
+        )
+        if r.status_code == 200:
+            data = r.json()
+            for item in data.get("Data", []):
+                if item.get("currencyCode") == "USD":
+                    return float(item.get("sell", 0))
+    except Exception:
+        pass
+    return 26000.0
+
+
+def fmt_price(p: float) -> str:
+    if p >= 1:
+        return f"${p:,.2f}"
+    elif p >= 0.01:
+        return f"${p:.4f}"
+    elif p >= 0.0001:
+        return f"${p:.6f}"
+    else:
+        return f"${p:.8f}"
+
+
+def fmt_large(n: float) -> str:
+    if n >= 1_000_000_000:
+        return f"${n/1_000_000_000:.2f}B"
+    elif n >= 1_000_000:
+        return f"${n/1_000_000:.2f}M"
+    return f"${n:,.0f}"
+
+
+def fmt_supply(n: float) -> str:
+    if n >= 1_000_000_000:
+        return f"{n/1_000_000_000:.2f}B"
+    elif n >= 1_000_000:
+        return f"{n/1_000_000:.2f}M"
+    return f"{n:,.0f}"
+
+
+def get_top_gainers(limit: int = 5) -> str:
+    try:
+        url = "https://pro-api.coinmarketcap.com/v1/cryptocurrency/listings/latest"
+        headers = {"X-CMC_PRO_API_KEY": CMC_API_KEY, "Accept": "application/json"}
+        params = {
+            "sort": "percent_change_24h",
+            "sort_dir": "desc",
+            "limit": 20,
+            "convert": "USD",
+        }
+        r = requests.get(url, headers=headers, params=params, timeout=10)
+        data = r.json()
+        if data.get("status", {}).get("error_code") != 0:
+            return ""
+
+        coins = [c for c in data.get("data", []) if c["quote"]["USD"]["percent_change_24h"] > 0]
+        coins = coins[:limit]
+
+        lines = [f"🔥 Top {limit} Token Tăng Mạnh Nhất 24h\n"]
+        for i, coin in enumerate(coins, 1):
+            name = coin["name"]
+            symbol = coin["symbol"]
+            q = coin["quote"]["USD"]
+            price = fmt_price(q["price"])
+            ch24 = q["percent_change_24h"]
+            mc = fmt_large(q["market_cap"])
+            lines.append(
+                f"{i}. 🟢 {name} ({symbol})\n"
+                f"💲 Price: {price}\n"
+                f"📈 24h: +{ch24:.2f}%\n"
+                f"🏦 MC: {mc}"
+            )
+        return "\n\n".join(lines)
+    except Exception as e:
+        print(f"❌ CMC top gainers lỗi: {e}")
+        return ""
+
+
+def get_price_detailed(symbols: list[str]) -> str:
+    try:
+        url = "https://pro-api.coinmarketcap.com/v1/cryptocurrency/quotes/latest"
+        headers = {"X-CMC_PRO_API_KEY": CMC_API_KEY, "Accept": "application/json"}
+        params = {"symbol": ",".join(symbols), "convert": "USD"}
+        r = requests.get(url, headers=headers, params=params, timeout=10)
+        data = r.json()
+        if data.get("status", {}).get("error_code") != 0:
+            return "❌ Không tìm thấy coin này."
+
+        lines = []
+        for symbol in symbols:
+            coin_data = data.get("data", {}).get(symbol.upper())
+            if not coin_data:
+                lines.append(f"❌ Không tìm thấy: {symbol}")
+                continue
+            if isinstance(coin_data, list):
+                coin_data = coin_data[0]
+
+            name = coin_data["name"]
+            q = coin_data["quote"]["USD"]
+            price = q["price"]
+            ch24 = q["percent_change_24h"]
+            ch7d = q["percent_change_7d"]
+            vol = q["volume_24h"]
+            mc = q["market_cap"]
+            fdv = q.get("fully_diluted_market_cap", 0)
+            circ = coin_data.get("circulating_supply", 0)
+            total = coin_data.get("total_supply", 0)
+
+            icon = "🟢" if ch24 >= 0 else "🔴"
+            sign24 = "+" if ch24 >= 0 else ""
+            sign7d = "+" if ch7d >= 0 else ""
+
+            lines.append(
+                f"{icon} {name} ({symbol.upper()})\n"
+                f"💲 Price: {fmt_price(price)}\n"
+                f"📈 24h: {sign24}{ch24:.2f}%\n"
+                f"📊 7d: {sign7d}{ch7d:.2f}%\n"
+                f"📊 Vol 24h: {fmt_large(vol)}\n"
+                f"🏦 MC: {fmt_large(mc)}\n"
+                f"💎 FDV: {fmt_large(fdv) if fdv else 'N/A'}\n"
+                f"🔄 Supply: {fmt_supply(circ)} / {fmt_supply(total)}"
+            )
+        return "\n\n".join(lines)
+    except Exception as e:
+        print(f"❌ CMC price lỗi: {e}")
+        return "❌ Lỗi lấy dữ liệu, thử lại sau."
+
+
+def get_val(amount: float, symbol: str) -> str:
+    try:
+        url = "https://pro-api.coinmarketcap.com/v1/cryptocurrency/quotes/latest"
+        headers = {"X-CMC_PRO_API_KEY": CMC_API_KEY, "Accept": "application/json"}
+        params = {"symbol": symbol.upper(), "convert": "USD"}
+        r = requests.get(url, headers=headers, params=params, timeout=10)
+        data = r.json()
+        if data.get("status", {}).get("error_code") != 0:
+            return "❌ Không tìm thấy coin này."
+
+        coin_data = data.get("data", {}).get(symbol.upper())
+        if not coin_data:
+            return f"❌ Không tìm thấy: {symbol}"
+        if isinstance(coin_data, list):
+            coin_data = coin_data[0]
+
+        name = coin_data["name"]
+        price = coin_data["quote"]["USD"]["price"]
+        usd_val = amount * price
+        vnd_rate = get_usd_to_vnd()
+        vnd_val = usd_val * vnd_rate
+
+        return (
+            f"💲 {name} ({symbol.upper()}) — {fmt_price(price)}\n"
+            f"🧮 {amount:,.0f} {symbol.upper()}\n"
+            f"💵 ${usd_val:,.2f} USDT\n"
+            f"🇻🇳 ₫{vnd_val:,.0f} VNĐ"
+        )
+    except Exception as e:
+        print(f"❌ CMC val lỗi: {e}")
+        return "❌ Lỗi tính toán, thử lại sau."
+
+
 def ai_needs_search(query: str) -> bool:
     try:
         response = client.chat.completions.create(
@@ -332,16 +496,18 @@ async def start(update: Update, context):
 
 async def help_command(update: Update, context):
     await update.message.reply_text(
-        "📖 Hướng dẫn sử dụng:\n\n"
-        "• Nhắn tin bình thường → bot trả lời\n"
-        "• Hỏi tin tức, thời tiết → bot tự tìm kiếm web 🌐\n"
-        "• Hỏi giá coin/crypto → lấy giá thật từ CoinMarketCap 📈\n"
-        "• Hỏi giá vàng → lấy giá thật từ SJC realtime 🥇\n"
-        "  Ví dụ: 'giá vàng hôm nay', 'vàng SJC bao nhiêu?'\n"
-        "• Bot nhớ ngữ cảnh hội thoại 🧠\n"
-        "• /clear — xóa lịch sử hội thoại\n"
-        "• /start — bắt đầu lại từ đầu\n"
-        "• /help — xem hướng dẫn này"
+        "📖 Menu lệnh:\n\n"
+        "🔥 /hot — Top 5 token tăng giá mạnh nhất 24h\n\n"
+        "💲 /p <symbol> — Xem giá coin chi tiết\n"
+        "   Ví dụ: /p BTC hoặc /p BTC ETH SOL\n\n"
+        "🧮 /val <số lượng> <ticker> — Tính giá trị token\n"
+        "   Ví dụ: /val 1000 BTC\n\n"
+        "🥇 Hỏi giá vàng → lấy giá thật từ SJC realtime\n"
+        "   Ví dụ: 'giá vàng hôm nay', 'vàng SJC bao nhiêu?'\n\n"
+        "🌐 Hỏi tin tức, thời tiết → tự tìm kiếm web\n\n"
+        "🗑️ /clear — xóa lịch sử hội thoại\n"
+        "🔄 /start — bắt đầu lại\n"
+        "📖 /help — menu này"
     )
 
 
@@ -349,6 +515,40 @@ async def clear_command(update: Update, context):
     user_id = update.effective_user.id
     chat_histories.pop(user_id, None)
     await update.message.reply_text("🗑️ Đã xóa lịch sử! Bắt đầu lại nhé 😊")
+
+
+async def hot_command(update: Update, context):
+    await context.bot.send_chat_action(chat_id=update.message.chat_id, action="typing")
+    result = await asyncio.to_thread(get_top_gainers, 5)
+    if result:
+        await update.message.reply_text(result)
+    else:
+        await update.message.reply_text("⚠️ Không lấy được dữ liệu, thử lại sau.")
+
+
+async def p_command(update: Update, context):
+    if not context.args:
+        await update.message.reply_text("📌 Cách dùng: /p BTC ETH SOL")
+        return
+    symbols = [s.upper() for s in context.args[:5]]
+    await context.bot.send_chat_action(chat_id=update.message.chat_id, action="typing")
+    result = await asyncio.to_thread(get_price_detailed, symbols)
+    await update.message.reply_text(result)
+
+
+async def val_command(update: Update, context):
+    if not context.args or len(context.args) < 2:
+        await update.message.reply_text("📌 Cách dùng: /val 1000 BTC")
+        return
+    try:
+        amount = float(context.args[0].replace(",", ""))
+    except ValueError:
+        await update.message.reply_text("❌ Số lượng không hợp lệ. Ví dụ: /val 1000 BTC")
+        return
+    symbol = context.args[1].upper()
+    await context.bot.send_chat_action(chat_id=update.message.chat_id, action="typing")
+    result = await asyncio.to_thread(get_val, amount, symbol)
+    await update.message.reply_text(result)
 
 
 async def handle_message(update: Update, context):
@@ -429,6 +629,9 @@ def main():
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("clear", clear_command))
+    app.add_handler(CommandHandler("hot", hot_command))
+    app.add_handler(CommandHandler("p", p_command))
+    app.add_handler(CommandHandler("val", val_command))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     print("🚀 Bot đang chạy...")
