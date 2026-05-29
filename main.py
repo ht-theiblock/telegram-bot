@@ -184,6 +184,20 @@ async def handle_message(update: Update, context):
         if not user_message:
             return
 
+        # Nếu đang reply tin nhắn của thành viên khác (không phải bot), đính kèm nội dung đó vào ngữ cảnh
+        replied = update.message.reply_to_message
+        if (
+            replied is not None
+            and replied.from_user is not None
+            and replied.from_user.username != bot_username
+            and replied.text
+        ):
+            replied_name = replied.from_user.first_name or replied.from_user.username or "thành viên"
+            user_message = (
+                f'[Tin nhắn của {replied_name}: "{replied.text}"]\n'
+                f'{user_message}'
+            )
+
     await context.bot.send_chat_action(chat_id=chat_id, action="typing")
 
     try:
