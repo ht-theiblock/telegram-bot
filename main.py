@@ -1,6 +1,7 @@
 import os
 import asyncio
 import threading
+import requests
 from flask import Flask
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters
@@ -19,11 +20,14 @@ def run_health_server():
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
+CMC_API_KEY = os.environ.get("CMC_API_KEY")
 
 if not BOT_TOKEN:
     raise ValueError("❌ Chưa tìm thấy BOT_TOKEN!")
 if not OPENROUTER_API_KEY:
     raise ValueError("❌ Chưa tìm thấy OPENROUTER_API_KEY!")
+if not CMC_API_KEY:
+    raise ValueError("❌ Chưa tìm thấy CMC_API_KEY!")
 
 client = OpenAI(
     api_key=OPENROUTER_API_KEY,
@@ -46,6 +50,102 @@ SYSTEM_PROMPT = (
 MAX_HISTORY = 20
 chat_histories: dict[int, list[dict]] = {}
 
+CRYPTO_KEYWORDS = [
+    "giá", "price", "crypto", "coin", "token", "bitcoin", "ethereum", "bnb",
+    "btc", "eth", "sol", "xrp", "ada", "doge", "usdt", "usdc", "matic",
+    "avax", "dot", "link", "ltc", "shib", "trx", "ton", "pepe", "sui",
+    "pump", "dump", "chart", "thị trường", "market", "altcoin", "defi",
+    "mcap", "vốn hóa", "volume", "khối lượng", "24h", "tuần", "tháng"
+]
+
+
+def is_crypto_query(query: str) -> bool:
+    query_lower = query.lower()
+    return any(kw in query_lower for kw in CRYPTO_KEYWORDS)
+
+
+def extract_crypto_symbols(query: str) -> list[str]:
+    try:
+        response = client.chat.completions.create(
+            model=MODEL,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "Trích xuất tất cả ký hiệu (ticker symbol) của các đồng coin/token được nhắc đến trong câu hỏi. "
+                        "Chỉ trả về danh sách symbol viết hoa, cách nhau bởi dấu phẩy. Ví dụ: BTC,ETH,SOL. "
+                        "Nếu không tìm thấy symbol cụ thể, trả về: NONE."
+                    )
+                },
+                {"role": "user", "content": query}
+            ],
+            temperature=0,
+            max_tokens=30,
+        )
+        result = response.choices[0].message.content.strip().upper()
+        if result == "NONE" or not result:
+            return []
+        symbols = [s.strip() for s in result.split(",") if s.strip()]
+        return symbols[:5]
+    except Exception:
+        return []
+
+
+def get_crypto_prices(symbols: list[str]) -> str:
+    if not symbols:
+        return ""
+    try:
+        url = "https://pro-api.coinmarketcap.com/v1/cryptocurrency/quotes/latest"
+        headers = {"X-CMC_PRO_API_KEY": CMC_API_KEY, "Accept": "application/json"}
+        params = {"symbol": ",".join(symbols), "convert": "USD"}
+        response = requests.get(url, headers=headers, params=params, timeout=10)
+        data = response.json()
+
+        if data.get("status", {}).get("error_code") != 0:
+            return ""
+
+        lines = []
+        for symbol in symbols:
+            coin_data = data.get("data", {}).get(symbol)
+            if not coin_data:
+                continue
+            if isinstance(coin_data, list):
+                coin_data = coin_data[0]
+            name = coin_data.get("name", symbol)
+            quote = coin_data.get("quote", {}).get("USD", {})
+            price = quote.get("price", 0)
+            change_1h = quote.get("percent_change_1h", 0)
+            change_24h = quote.get("percent_change_24h", 0)
+            change_7d = quote.get("percent_change_7d", 0)
+            mcap = quote.get("market_cap", 0)
+            volume_24h = quote.get("volume_24h", 0)
+
+            def fmt_price(p):
+                if p >= 1:
+                    return f"${p:,.2f}"
+                elif p >= 0.01:
+                    return f"${p:.4f}"
+                else:
+                    return f"${p:.8f}"
+
+            def fmt_large(n):
+                if n >= 1_000_000_000:
+                    return f"${n/1_000_000_000:.2f}B"
+                elif n >= 1_000_000:
+                    return f"${n/1_000_000:.2f}M"
+                return f"${n:,.0f}"
+
+            lines.append(
+                f"{name} ({symbol}): {fmt_price(price)} | "
+                f"1h: {change_1h:+.2f}% | 24h: {change_24h:+.2f}% | 7d: {change_7d:+.2f}% | "
+                f"Vốn hóa: {fmt_large(mcap)} | Volume 24h: {fmt_large(volume_24h)}"
+            )
+
+        return "\n".join(lines) if lines else ""
+    except Exception as e:
+        print(f"❌ CMC API lỗi: {e}")
+        return ""
+
 
 def ai_needs_search(query: str) -> bool:
     try:
@@ -57,7 +157,8 @@ def ai_needs_search(query: str) -> bool:
                     "content": (
                         "Bạn là bộ phân loại câu hỏi. "
                         "Nhiệm vụ: xác định câu hỏi có cần thông tin thời gian thực không "
-                        "(tin tức, thời tiết, giá cả, sự kiện hiện tại, kết quả mới nhất...). "
+                        "(tin tức, thời tiết, sự kiện hiện tại, kết quả mới nhất...). "
+                        "KHÔNG tính các câu hỏi về giá coin/crypto vì đã có nguồn riêng. "
                         "Chỉ trả lời đúng 1 từ: YES hoặc NO."
                     )
                 },
@@ -102,12 +203,27 @@ def add_to_history(user_id: int, role: str, content: str):
         chat_histories[user_id] = history[-(MAX_HISTORY * 2):]
 
 
-def call_ai(user_id: int, user_message: str) -> tuple[str, bool]:
+def call_ai(user_id: int, user_message: str) -> tuple[str, bool, bool]:
     history = get_history(user_id)
     searched = False
+    crypto_used = False
     system_content = SYSTEM_PROMPT
 
-    if ai_needs_search(user_message):
+    if is_crypto_query(user_message):
+        symbols = extract_crypto_symbols(user_message)
+        if symbols:
+            print(f"📈 Lấy giá crypto: {symbols}")
+            price_data = get_crypto_prices(symbols)
+            if price_data:
+                crypto_used = True
+                system_content = (
+                    SYSTEM_PROMPT + "\n\n"
+                    "Dưới đây là dữ liệu giá crypto thời gian thực từ CoinMarketCap. "
+                    "Hãy dùng thông tin này để trả lời chính xác:\n\n"
+                    f"{price_data}"
+                )
+
+    if not crypto_used and ai_needs_search(user_message):
         print(f"🔍 Tìm kiếm web: {user_message}")
         search_results = web_search(user_message)
         searched = True
@@ -128,7 +244,7 @@ def call_ai(user_id: int, user_message: str) -> tuple[str, bool]:
         temperature=0.7,
         max_tokens=1024,
     )
-    return response.choices[0].message.content, searched
+    return response.choices[0].message.content, searched, crypto_used
 
 
 async def start(update: Update, context):
@@ -139,6 +255,7 @@ async def start(update: Update, context):
         "✨ Mình có thể:\n"
         "• Trả lời mọi câu hỏi\n"
         "• Tìm kiếm thông tin thời gian thực 🌐\n"
+        "• Tra giá coin/crypto realtime 📈\n"
         "• Nhớ ngữ cảnh cuộc trò chuyện 🧠\n"
         "• Hỗ trợ học tập, công việc\n\n"
         "Cứ nhắn gì cũng được! 😊\n"
@@ -150,7 +267,8 @@ async def help_command(update: Update, context):
     await update.message.reply_text(
         "📖 Hướng dẫn sử dụng:\n\n"
         "• Nhắn tin bình thường → bot trả lời\n"
-        "• Hỏi tin tức, thời tiết, giá cả → bot tự tìm kiếm web 🌐\n"
+        "• Hỏi tin tức, thời tiết → bot tự tìm kiếm web 🌐\n"
+        "• Hỏi giá coin/crypto → bot lấy giá thật từ CoinMarketCap 📈\n"
         "• Bot nhớ ngữ cảnh hội thoại 🧠\n"
         "• /clear — xóa lịch sử hội thoại\n"
         "• /start — bắt đầu lại từ đầu\n"
@@ -184,7 +302,6 @@ async def handle_message(update: Update, context):
         if not user_message:
             return
 
-        # Nếu đang reply tin nhắn của thành viên khác (không phải bot), đính kèm nội dung đó vào ngữ cảnh
         replied = update.message.reply_to_message
         if (
             replied is not None
@@ -201,13 +318,15 @@ async def handle_message(update: Update, context):
     await context.bot.send_chat_action(chat_id=chat_id, action="typing")
 
     try:
-        reply, searched = await asyncio.to_thread(call_ai, user_id, user_message)
+        reply, searched, crypto_used = await asyncio.to_thread(call_ai, user_id, user_message)
         if not reply:
             reply = "😅 Mình chưa hiểu lắm, bạn có thể hỏi lại không?"
 
         reply = reply.replace("**", "").replace("__", "").replace("```", "").replace("##", "").replace("# ", "")
 
-        if searched:
+        if crypto_used:
+            reply = "📈 " + reply
+        elif searched:
             reply = "🌐 " + reply
 
         add_to_history(user_id, "user", user_message)
@@ -225,6 +344,7 @@ def main():
     print("🔑 OpenRouter API key: ✅")
     print(f"🧠 Model: {MODEL}")
     print("🌐 Tìm kiếm web: ✅ DuckDuckGo")
+    print("📈 Giá crypto: ✅ CoinMarketCap")
 
     t = threading.Thread(target=run_health_server, daemon=True)
     t.start()
