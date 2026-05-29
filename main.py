@@ -1,9 +1,11 @@
 import os
 import asyncio
 import threading
+import time
 import requests
 from flask import Flask
 from telegram import Update
+from telegram.error import Conflict
 from telegram.ext import Application, CommandHandler, MessageHandler, filters
 from openai import OpenAI
 from ddgs import DDGS
@@ -21,16 +23,12 @@ def run_health_server():
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 OPENROUTER_API_KEY = os.environ.get("OPENROUTER_API_KEY")
 CMC_API_KEY = os.environ.get("CMC_API_KEY")
-RAPIDAPI_KEY = os.environ.get("RAPIDAPI_KEY")
-
 if not BOT_TOKEN:
     raise ValueError("❌ Chưa tìm thấy BOT_TOKEN!")
 if not OPENROUTER_API_KEY:
     raise ValueError("❌ Chưa tìm thấy OPENROUTER_API_KEY!")
 if not CMC_API_KEY:
     raise ValueError("❌ Chưa tìm thấy CMC_API_KEY!")
-if not RAPIDAPI_KEY:
-    raise ValueError("❌ Chưa tìm thấy RAPIDAPI_KEY!")
 
 client = OpenAI(
     api_key=OPENROUTER_API_KEY,
@@ -434,7 +432,16 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     print("🚀 Bot đang chạy...")
-    app.run_polling()
+    for attempt in range(5):
+        try:
+            app.run_polling(drop_pending_updates=True)
+            break
+        except Conflict:
+            wait = (attempt + 1) * 5
+            print(f"⚠️ Conflict: instance khác đang chạy. Thử lại sau {wait}s... (lần {attempt + 1}/5)")
+            time.sleep(wait)
+    else:
+        print("❌ Không thể khởi động sau 5 lần thử.")
 
 
 if __name__ == "__main__":
