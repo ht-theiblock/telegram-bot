@@ -38,14 +38,19 @@ client = OpenAI(
 MODEL = "deepseek/deepseek-chat"
 
 SYSTEM_PROMPT = (
+    "ABSOLUTE RULE (highest priority, no exceptions): You MUST always respond in Vietnamese (Tiếng Việt). "
+    "NEVER use Chinese (中文), English, or any other language. "
+    "Even if the user writes in another language, your reply must still be in Vietnamese only. "
+    "LUẬT BẮT BUỘC TUYỆT ĐỐI: Luôn luôn trả lời bằng tiếng Việt. Không được dùng tiếng Trung, tiếng Anh hay bất kỳ ngôn ngữ nào khác.\n\n"
     "Bạn là một người bạn đồng hành AI thông minh, thân thiện và hài hước. "
     "Bạn có tên là Gà đây!. "
-    "Hãy trả lời các câu hỏi bằng tiếng Việt một cách tự nhiên, sử dụng giọng điệu gần gũi, thoải mái, "
+    "Trả lời bằng tiếng Việt một cách tự nhiên, sử dụng giọng điệu gần gũi, thoải mái, "
     "đôi khi có thể dùng một chút biểu tượng cảm xúc (emoji) để cuộc trò chuyện thêm sinh động. "
     "Mục tiêu của bạn là giúp đỡ và mang lại niềm vui cho người dùng. "
     "Nhớ ngữ cảnh của cuộc trò chuyện để trả lời mạch lạc. "
     "QUAN TRỌNG: Luôn trả lời CỰC NGẮN GỌN, súc tích, đi thẳng vào vấn đề. Không dài dòng, không giải thích thừa. "
-    "TUYỆT ĐỐI không dùng ký hiệu markdown như **, __, ##, ``` trong câu trả lời. Chỉ dùng văn bản thuần túy."
+    "TUYỆT ĐỐI không dùng ký hiệu markdown như **, __, ##, ``` trong câu trả lời. Chỉ dùng văn bản thuần túy. "
+    "NHẮC LẠI: Chỉ dùng tiếng Việt. Không được dùng tiếng Trung hay tiếng Anh."
 )
 
 MAX_HISTORY = 20
@@ -468,13 +473,17 @@ def call_ai(user_id: int, user_message: str) -> tuple[str, str]:
         {"role": "user", "content": user_message}
     ]
 
-    response = client.chat.completions.create(
-        model=MODEL,
-        messages=messages,
-        temperature=0.7,
-        max_tokens=1024,
-    )
-    return response.choices[0].message.content, source
+    try:
+        response = client.chat.completions.create(
+            model=MODEL,
+            messages=messages,
+            temperature=0.7,
+            max_tokens=1024,
+        )
+        return response.choices[0].message.content, source
+    except Exception as e:
+        print(f"❌ Lỗi gọi AI API: {type(e).__name__}: {e}")
+        raise
 
 
 async def start(update: Update, context):
@@ -605,8 +614,18 @@ async def handle_message(update: Update, context):
         await update.message.reply_text(reply)
 
     except Exception as e:
-        print(f"❌ Lỗi: {e}")
-        await update.message.reply_text("⚠️ Có lỗi xảy ra, vui lòng thử lại sau giây lát!")
+        import traceback
+        print(f"❌ Lỗi xử lý tin nhắn: {type(e).__name__}: {e}")
+        traceback.print_exc()
+        err_name = type(e).__name__
+        if "RateLimitError" in err_name or "429" in str(e):
+            await update.message.reply_text("⏳ API đang bận, vui lòng thử lại sau vài giây!")
+        elif "AuthenticationError" in err_name or "401" in str(e):
+            await update.message.reply_text("🔑 Lỗi xác thực API. Vui lòng kiểm tra lại API key!")
+        elif "Timeout" in err_name or "timeout" in str(e).lower():
+            await update.message.reply_text("⏱️ Kết nối bị timeout, thử lại nhé!")
+        else:
+            await update.message.reply_text(f"⚠️ Lỗi: {err_name} — thử lại sau giây lát!")
 
 
 def main():
